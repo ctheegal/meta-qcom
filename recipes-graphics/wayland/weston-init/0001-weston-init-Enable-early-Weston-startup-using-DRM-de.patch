@@ -1,0 +1,107 @@
+From 211fcfe4caf348f06707aef64d8899f059a15d2d Mon Sep 17 00:00:00 2001
+From: Vaibhav Jindal <vaibjind@qti.qualcomm.com>
+Date: Tue, 19 May 2026 18:07:54 +0530
+Subject: weston-init: Enable early Weston startup using DRM device trigger
+
+Modify weston.service to start Weston earlier in boot by removing
+default system dependencies and triggering startup based on
+/dev/dri/card0 availability.
+
+Changes:
+- Drop systemd-user-sessions, DBus, and graphical.target dependencies
+- Disable DefaultDependencies to avoid sysinit delay
+- Start Weston after dev-dri-card0.device
+- Move ordering to Before=multi-user.target
+- Run Weston as root to remove dependency on user sessions
+- Set XDG_RUNTIME_DIR explicitly for root execution
+- Create /tmp/.X11-unix with proper permissions via ExecStartPre
+
+Motivation:
+Waiting for sysinit.target and user-session dependencies delays
+Weston startup significantly. Starting Weston based on DRM device
+readiness enables earlier display bring-up and improves boot KPIs.
+
+Impact:
+- Reduces display start latency
+- Enables early compositor availability
+- Removes unnecessary runtime dependencies
+
+Tested:
+- Verified Weston starts immediately after /dev/dri/card0 creation
+- Confirmed display availability earlier in boot timeline
+- No dependency failures observed during startup
+---
+ .../wayland/weston-init/weston.service        | 38 ++++++++-----------
+ 1 file changed, 16 insertions(+), 22 deletions(-)
+
+diff --git a/meta/recipes-graphics/wayland/weston-init/weston.service b/meta/recipes-graphics/wayland/weston-init/weston.service
+index b7e845e88d..abd110ad6f 100644
+--- a/meta/recipes-graphics/wayland/weston-init/weston.service
++++ b/meta/recipes-graphics/wayland/weston-init/weston.service
+@@ -8,23 +8,12 @@ Description=Weston, a Wayland compositor, as a system service
+ Documentation=man:weston(1) man:weston.ini(5)
+ Documentation=http://wayland.freedesktop.org/
+ 
+-# Make sure we are started after logins are permitted.
+-Requires=systemd-user-sessions.service
+-After=systemd-user-sessions.service
++# Waiting for sysinit.target is too long, Instead, just wait for /dev/dri/card0
++DefaultDependencies=no
++Requires=dev-dri-card0.device
++After=dev-dri-card0.device
+ 
+-# If Plymouth is used, we want to start when it is on its way out.
+-After=plymouth-quit-wait.service
+-
+-# D-Bus is necessary for contacting logind. Logind is required.
+-Wants=dbus.socket
+-After=dbus.socket
+-
+-# Ensure the socket is present
+-Requires=weston.socket
+-
+-# Since we are part of the graphical session, make sure we are started before
+-# it is complete.
+-Before=graphical.target
++Before=multi-user.target
+
+ # Prevent starting on systems without virtual consoles, Weston requires one
+ # for now.
+@@ -34,18 +23,23 @@ ConditionPathExists=/dev/tty0
+ # Requires systemd-notify.so Weston plugin.
+ Type=notify
+ EnvironmentFile=@sysconfdir@/default/weston
++ExecStartPre=@bindir@/mkdir -p /tmp/.X11-unix
++ExecStartPre=@bindir@/chmod 1777 /tmp/.X11-unix
+ ExecStart=@bindir@/weston --modules=systemd-notify.so
+
+ # Optional watchdog setup
+ #TimeoutStartSec=60
+ #WatchdogSec=20
+
+-# The user to run Weston as.
+-User=@WESTON_USER@
+-Group=@WESTON_USER@
++# Run Weston as root
++User=root
++Group=root
++WorkingDirectory=/
+
+-# Make sure the working directory is the users home directory
+-WorkingDirectory=@WESTON_USER_HOME@
++# REQUIRED replacements for PAM
++Environment=XDG_RUNTIME_DIR=/run/weston
++RuntimeDirectory=weston
++RuntimeDirectoryMode=0700
+
+ # Set up a full user session for the user, required by Weston.
+ PAMName=weston-autologin
+@@ -68,4 +62,4 @@ UtmpMode=user
+ [Install]
+ # Note: If you only want weston to start on-demand, remove this line with a
+ # service drop file
+-WantedBy=graphical.target
++WantedBy=multi-user.target
+-- 
+2.43.0
+
